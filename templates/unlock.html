@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+
+{% block content %}
+<style>
+    /* Embedded CSS for Unlock Page */
+    .unlock-container {
+        max-width: 500px;
+        margin: 0 auto;
+        text-align: center;
+    }
+    .btn-unlock {
+        background-color: #ff0000; /* Iron House Red */
+        border-color: #ff0000;
+        color: #ffffff;
+        font-size: 1.25em;
+        padding: 0.75em 1.5em;
+        transition: background-color 0.3s, border-color 0.3s;
+        border-radius: 50px;
+    }
+    .btn-unlock:hover {
+        background-color: #cc0000;
+        border-color: #cc0000;
+        color: #ffffff;
+    }
+    h1, p {
+        color: #000000; /* Black */
+        font-family: 'Roboto', sans-serif;
+    }
+    .card {
+        border: none;
+        border-radius: 15px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    .card-body {
+        padding: 2rem;
+    }
+    /* Additional styles for status message */
+    #status {
+        margin-top: 15px;
+        color: #ff0000;
+        font-weight: bold;
+    }
+</style>
+
+<div class="unlock-container">
+    <div class="card my-5">
+        <div class="card-body">
+            <h1 class="card-title mb-4">Welcome to Iron House S&C</h1>
+            <p class="card-text mb-5">Press the button below to unlock the door and start your workout.</p>
+            <!-- Updated form action -->
+            <form id="unlock-form" action="{{ url_for('handle_unlock', external_id=external_id) }}" method="POST">
+                <button type="button" id="unlock-button" class="btn btn-unlock btn-lg w-100">Unlock Door</button>
+            </form>
+            <p id="status"></p>
+        </div>
+    </div>
+</div>
+
+<script>
+document.getElementById('unlock-button').addEventListener('click', function() {
+    var statusElement = document.getElementById('status');
+    statusElement.innerText = 'Requesting location...';
+    if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(function(position) {
+            // Got position, submit form with position data
+            var lat = position.coords.latitude;
+            var lon = position.coords.longitude;
+            // Create hidden inputs and submit form
+            var form = document.getElementById('unlock-form');
+            var latInput = document.createElement('input');
+            latInput.type = 'hidden';
+            latInput.name = 'latitude';
+            latInput.value = lat;
+            form.appendChild(latInput);
+            var lonInput = document.createElement('input');
+            lonInput.type = 'hidden';
+            lonInput.name = 'longitude';
+            lonInput.value = lon;
+            form.appendChild(lonInput);
+            form.submit();
+        }, function(error) {
+            var errorMessage = '';
+            switch(error.code) {
+                case error.PERMISSION_DENIED:
+                    errorMessage = 'Permission denied. Please enable location services and try again.';
+                    break;
+                case error.POSITION_UNAVAILABLE:
+                    errorMessage = 'Location information is unavailable.';
+                    break;
+                case error.TIMEOUT:
+                    errorMessage = 'The request to get your location timed out.';
+                    break;
+                default:
+                    errorMessage = 'An unknown error occurred while retrieving your location.';
+                    break;
+            }
+            statusElement.innerText = errorMessage;
+        });
+    } else {
+        statusElement.innerText = 'Geolocation is not supported by this browser.';
+    }
+});
+</script>
+{% endblock %}

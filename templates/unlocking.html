@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+
+{% block content %}
+<style>
+    /* Embedded CSS for Unlocking Page */
+    .unlocking-container {
+        max-width: 500px;
+        margin: 0 auto;
+        text-align: center;
+    }
+    h1, p {
+        color: #000000; /* Black */
+        font-family: 'Roboto', sans-serif;
+    }
+    .spinner-border {
+        width: 4rem;
+        height: 4rem;
+        color: #ff0000; /* Iron House Red */
+    }
+    .checkmark-icon {
+        font-size: 4rem;
+        color: #28a745; /* Green color for success */
+    }
+    .btn-home {
+        background-color: #333333; /* Dark Gray */
+        border-color: #333333;
+        color: #ffffff;
+        font-size: 1em;
+        padding: 0.5em 1em;
+        transition: background-color 0.3s, border-color 0.3s;
+        border-radius: 50px;
+    }
+    .btn-home:hover {
+        background-color: #555555;
+        border-color: #555555;
+        color: #ffffff;
+    }
+    .card {
+        border: none;
+        border-radius: 15px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    .card-body {
+        padding: 2rem;
+    }
+</style>
+
+<div class="unlocking-container">
+    <div class="card my-5">
+        <div class="card-body">
+            <!-- Unlocking Section -->
+            <div id="unlocking-section">
+                <h1 class="card-title mb-4">Unlocking...</h1>
+                <p class="card-text mb-4">Please wait while we unlock the door for you.</p>
+                <!-- Spinner for visual feedback -->
+                <div class="d-flex justify-content-center mb-4">
+                    <div class="spinner-border" role="status">
+                        <span class="visually-hidden">Unlocking...</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Unlocked Section -->
+            <div id="unlocked-section" style="display: none;">
+                <h1 class="card-title mb-4">Unlocked!</h1>
+                <p class="card-text mb-4">The door is now unlocked. Have a great workout!</p>
+                <!-- Checkmark Icon -->
+                <div class="d-flex justify-content-center mb-4">
+                    <!-- Using Bootstrap Icons -->
+                    <svg class="bi bi-check-circle-fill checkmark-icon" xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" fill="currentColor" viewBox="0 0 16 16">
+                        <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM6.002 10.803l-2.3-2.3a1 1 0 0 1 1.414-1.414l1.647 1.647 4.646-4.646a1 1 0 1 1 1.414 1.414l-5.353 5.353a1 1 0 0 1-1.414 0z"/>
+                    </svg>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- JavaScript to switch content after a delay -->
+<script>
+    // Wait for the DOM to fully load
+    document.addEventListener('DOMContentLoaded', function() {
+        // Set a timeout to switch the content after 3 seconds
+        setTimeout(function() {
+            // Hide the unlocking section
+            document.getElementById('unlocking-section').style.display = 'none';
+            // Show the unlocked section
+            document.getElementById('unlocked-section').style.display = 'block';
+        }, 3000); // 3000 milliseconds = 3 seconds
+    });
+</script>
+{% endblock %}
+

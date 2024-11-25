@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Unlock Door</title>
+</head>
+<body>
+    <h1>Unlock Door</h1>
+    {% if message %}
+        <p>{{ message }}</p>
+    {% else %}
+        <form method="post">
+            <input type="hidden" name="token" value="{{ token }}">
+            <button type="submit">Unlock</button>
+        </form>
+    {% endif %}
+</body>
+</html>

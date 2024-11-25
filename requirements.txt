@@ -1,0 +1,13 @@
+Flask
+Flask-SQLAlchemy
+Flask-Migrate
+Flask-Cors
+gunicorn
+twilio
+requests
+python-dotenv
+pymongo
+psycopg2
+flask-limiter
+phonenumbers
+geopy

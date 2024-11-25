@@ -1,0 +1,37 @@
+<!-- templates/error.html -->
+{% extends "base.html" %}
+
+{% block content %}
+<style>
+    /* Styles for Error Page */
+    .error-container {
+        max-width: 500px;
+        margin: 0 auto;
+        text-align: center;
+    }
+    h1, p {
+        color: #000000; /* Black */
+        font-family: 'Roboto', sans-serif;
+    }
+    .card {
+        border: none;
+        border-radius: 15px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        margin-top: 50px;
+    }
+    .card-body {
+        padding: 2rem;
+    }
+</style>
+
+<div class="error-container">
+    <div class="card my-5">
+        <div class="card-body">
+            <h1 class="card-title mb-4">Oops!</h1>
+            <p class="card-text mb-5">{{ message }}</p>
+            <!-- Optional: Add a button to redirect back to home or a relevant page -->
+            
+        </div>
+    </div>
+</div>
+{% endblock %}
