@@ -747,7 +747,7 @@ def create_unlock_link(external_id):
 def process_user_creation(first_name, last_name, email, phone_number, external_id, membership_duration_hours=24):
     """
     Complete workflow to create or update a user in CRM, store membership info, assign access levels,
-    generate unlock link, and send an SMS.
+    generate unlock link, and (optionally) send an SMS.
     """
     try:
         with app.app_context():
@@ -783,20 +783,28 @@ def process_user_creation(first_name, last_name, email, phone_number, external_i
             if existing_user:
                 logger.info(f"User with email {email} already exists in the local database.")
 
-                # Update membership dates
                 current_time = datetime.datetime.utcnow()
-                new_membership_end = max(existing_user.membership_end, current_time) + timedelta(hours=membership_duration_hours)
-                existing_user.membership_end = new_membership_end
+
+                # If membership_end < now => membership is expired => renew from now
+                # Otherwise => membership still active => extend from the existing end
+                if existing_user.membership_end < current_time:
+                    logger.info("Membership is expired. Renewing from now.")
+                    existing_user.membership_end = current_time + timedelta(hours=membership_duration_hours)
+                else:
+                    logger.info("Membership is active. Extending existing membership.")
+                    existing_user.membership_end += timedelta(hours=membership_duration_hours)
+
                 db.session.commit()
-                logger.info(f"Extended membership for user {email} to {new_membership_end}")
+                logger.info(
+                    f"Updated membership for user {email} to {existing_user.membership_end}"
+                )
 
                 # Generate new unlock token with the same external_id
                 unlock_token_str = generate_unlock_token(existing_user.id, external_id)
                 unlock_link = create_unlock_link(external_id)
                 logger.info(f"Generated new unlock token for user {email}")
 
-                # Optionally, reassign access levels if needed
-                # If access levels may have changed or need to be refreshed, uncomment the following lines:
+                # Optionally, reassign or refresh access levels if needed:
                 # assign_access_levels_to_user(
                 #     base_address=BASE_ADDRESS,
                 #     access_token=access_token,
@@ -805,7 +813,7 @@ def process_user_creation(first_name, last_name, email, phone_number, external_i
                 #     access_levels=access_levels
                 # )
 
-                return  # Exit the function after handling existing user
+                return  # Stop here after handling existing user
 
             # Step 5: Create the user via CRM API and store in local database
             user, user_id = create_user(
@@ -830,7 +838,7 @@ def process_user_creation(first_name, last_name, email, phone_number, external_i
                 access_levels=access_levels
             )
 
-            # Optional: Wait for access levels to be processed
+            # Optional: Wait briefly for access level assignment
             time.sleep(2)
 
             # Step 7: Generate Unlock Token and Link
@@ -839,6 +847,7 @@ def process_user_creation(first_name, last_name, email, phone_number, external_i
 
     except Exception as e:
         logger.exception(f"Error in processing user creation: {e}")
+
 # ----------------------------
 # Unlock Token Management
 # ----------------------------
