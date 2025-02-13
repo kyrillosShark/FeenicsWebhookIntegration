@@ -31,7 +31,7 @@ load_dotenv()
 # ----------------------------
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "https://flask-webhook-b9gd.onrender.com"}})
+CORS(app)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
