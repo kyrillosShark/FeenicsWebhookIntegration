@@ -102,11 +102,11 @@ let topMeshRef = null; // We'll store the red indicator top mesh here
 
 /** LOAD MODEL **/
 const mtlLoader = new THREE.MTLLoader();
-mtlLoader.load('reader.mtl', function(materials) {
+mtlLoader.load('/static/reader.mtl', function(materials) {
   materials.preload();
   const objLoader = new THREE.OBJLoader();
   objLoader.setMaterials(materials);
-  objLoader.load('reader.obj',
+  objLoader.load('/static/reader.obj',
     function(object) {
       console.log('Loaded object:', object);
 
@@ -137,7 +137,7 @@ mtlLoader.load('reader.mtl', function(materials) {
             clippingPlanes: [ new THREE.Plane(new THREE.Vector3(0, -1, 0), T) ],
             clipShadows: true
           });
-          textureLoader.load('/templates/texture.png', function(doorTexture) {
+          textureLoader.load('/static/texture.png', function(doorTexture) {
             doorTexture.encoding = THREE.sRGBEncoding;
             bottomMaterial.map = doorTexture;
             bottomMaterial.needsUpdate = true;
