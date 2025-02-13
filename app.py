@@ -989,7 +989,7 @@ def handle_unlock(external_id):
             return render_template('error.html', message=result), 400
 
         # Pass external_id to the template
-        return render_template('unlock.html', external_id=external_id)
+        return render_template('templates/unlock.html', external_id=external_id)
     elif request.method == 'POST':
         logger.debug(f"Processing unlock for external_id: {external_id}")
         is_valid, result = validate_unlock_token_by_external_id(external_id)
