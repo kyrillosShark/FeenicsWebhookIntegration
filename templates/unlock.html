@@ -2,103 +2,274 @@
 
 {% block content %}
 <style>
-    /* Embedded CSS for Unlock Page */
-    .unlock-container {
-        max-width: 500px;
-        margin: 0 auto;
-        text-align: center;
-    }
-    .btn-unlock {
-        background-color: #ff0000; /* Iron House Red */
-        border-color: #ff0000;
-        color: #ffffff;
-        font-size: 1.25em;
-        padding: 0.75em 1.5em;
-        transition: background-color 0.3s, border-color 0.3s;
-        border-radius: 50px;
-    }
-    .btn-unlock:hover {
-        background-color: #cc0000;
-        border-color: #cc0000;
-        color: #ffffff;
-    }
-    h1, p {
-        color: #000000; /* Black */
-        font-family: 'Roboto', sans-serif;
-    }
-    .card {
-        border: none;
-        border-radius: 15px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-    }
-    .card-body {
-        padding: 2rem;
-    }
-    /* Additional styles for status message */
-    #status {
-        margin-top: 15px;
-        color: #ff0000;
-        font-weight: bold;
-    }
+  /* Embedded CSS for Unlock Page */
+  .unlock-container {
+      max-width: 500px;
+      margin: 0 auto;
+      text-align: center;
+  }
+  .btn-unlock {
+      background-color: #ff0000; /* Iron House Red */
+      border-color: #ff0000;
+      color: #ffffff;
+      font-size: 1.25em;
+      padding: 0.75em 1.5em;
+      transition: background-color 0.3s, border-color 0.3s;
+      border-radius: 50px;
+      cursor: pointer;
+  }
+  .btn-unlock:hover {
+      background-color: #cc0000;
+      border-color: #cc0000;
+      color: #ffffff;
+  }
+  h1, p {
+      color: #000000;
+      font-family: 'Roboto', sans-serif;
+  }
+  .card {
+      border: none;
+      border-radius: 15px;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+  }
+  .card-body {
+      padding: 2rem;
+  }
+  #viewer {
+      width: 100%;
+      height: 300px;
+      background-color: #ffffff;
+      margin-bottom: 1rem;
+  }
+  #status {
+      margin-top: 15px;
+      color: #ff0000;
+      font-weight: bold;
+  }
 </style>
 
 <div class="unlock-container">
-    <div class="card my-5">
-        <div class="card-body">
-            <h1 class="card-title mb-4">Welcome to Iron House S&C</h1>
-            <p class="card-text mb-5">Press the button below to unlock the door and start your workout.</p>
-            <!-- Updated form action -->
-            <form id="unlock-form" action="{{ url_for('handle_unlock', external_id=external_id) }}" method="POST">
-                <button type="button" id="unlock-button" class="btn btn-unlock btn-lg w-100">Unlock Door</button>
-            </form>
-            <p id="status"></p>
-        </div>
+  <div class="card my-5">
+    <div class="card-body">
+      <h1 class="card-title mb-4">Welcome to Iron House S&amp;C</h1>
+      <p class="card-text mb-4">Press the button below to unlock the door and start your workout.</p>
+
+      <!-- 3D Viewer Container -->
+      <div id="viewer"></div>
+
+      <button type="button" id="unlock-button" class="btn btn-unlock btn-lg w-100">
+        Unlock Door
+      </button>
+      <p id="status"></p>
     </div>
+  </div>
 </div>
 
+<!-- Include Three.js, MTLLoader, OBJLoader, OrbitControls -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/MTLLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
 <script>
-document.getElementById('unlock-button').addEventListener('click', function() {
-    var statusElement = document.getElementById('status');
-    statusElement.innerText = 'Requesting location...';
-    if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(function(position) {
-            // Got position, submit form with position data
-            var lat = position.coords.latitude;
-            var lon = position.coords.longitude;
-            // Create hidden inputs and submit form
-            var form = document.getElementById('unlock-form');
-            var latInput = document.createElement('input');
-            latInput.type = 'hidden';
-            latInput.name = 'latitude';
-            latInput.value = lat;
-            form.appendChild(latInput);
-            var lonInput = document.createElement('input');
-            lonInput.type = 'hidden';
-            lonInput.name = 'longitude';
-            lonInput.value = lon;
-            form.appendChild(lonInput);
-            form.submit();
-        }, function(error) {
-            var errorMessage = '';
-            switch(error.code) {
-                case error.PERMISSION_DENIED:
-                    errorMessage = 'Permission denied. Please enable location services and try again.';
-                    break;
-                case error.POSITION_UNAVAILABLE:
-                    errorMessage = 'Location information is unavailable.';
-                    break;
-                case error.TIMEOUT:
-                    errorMessage = 'The request to get your location timed out.';
-                    break;
-                default:
-                    errorMessage = 'An unknown error occurred while retrieving your location.';
-                    break;
-            }
-            statusElement.innerText = errorMessage;
-        });
-    } else {
-        statusElement.innerText = 'Geolocation is not supported by this browser.';
+/** SCENE SETUP **/
+const scene = new THREE.Scene();
+const container = document.getElementById('viewer');
+const width = container.clientWidth;
+const height = container.clientHeight;
+const camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.localClippingEnabled = true;
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(width, height);
+renderer.setClearColor(0xffffff);
+container.appendChild(renderer.domElement);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.screenSpacePanning = false;
+controls.minDistance = 2;
+controls.maxDistance = 50;
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 10);
+hemiLight.position.set(0, 20, 0);
+scene.add(hemiLight);
+
+let topMeshRef = null; // We'll store the red indicator top mesh here
+
+/** LOAD MODEL **/
+const mtlLoader = new THREE.MTLLoader();
+mtlLoader.load('reader.mtl', function(materials) {
+  materials.preload();
+  const objLoader = new THREE.OBJLoader();
+  objLoader.setMaterials(materials);
+  objLoader.load('reader.obj',
+    function(object) {
+      console.log('Loaded object:', object);
+
+      // Look for child named "obj2", then split top/bottom
+      object.traverse(function(child) {
+        if (child.isMesh && child.name === "obj2") {
+          child.geometry.computeBoundingBox();
+          const box = child.geometry.boundingBox;
+          const T = (box.min.y + box.max.y) / 2;
+
+          // Top half (RED)
+          const topMaterial = new THREE.MeshPhongMaterial({
+            color: 0xff0000,
+            clippingPlanes: [ new THREE.Plane(new THREE.Vector3(0, 1, 0), -T) ],
+            clipShadows: true
+          });
+          const topGeometry = child.geometry.clone();
+          const topMesh = new THREE.Mesh(topGeometry, topMaterial);
+          topMesh.name = child.name + "_top";
+          topMeshRef = topMesh; // <---- Save reference
+
+          // Bottom half (grey with texture)
+          const textureLoader = new THREE.TextureLoader();
+          const bottomMaterial = new THREE.MeshStandardMaterial({
+            color: 0xbbbbbb,
+            emissive: new THREE.Color(0x444444),
+            emissiveIntensity: 0.3,
+            clippingPlanes: [ new THREE.Plane(new THREE.Vector3(0, -1, 0), T) ],
+            clipShadows: true
+          });
+          textureLoader.load('/templates/texture.png', function(doorTexture) {
+            doorTexture.encoding = THREE.sRGBEncoding;
+            bottomMaterial.map = doorTexture;
+            bottomMaterial.needsUpdate = true;
+          });
+
+          const bottomGeometry = child.geometry.clone();
+          const bottomMesh = new THREE.Mesh(bottomGeometry, bottomMaterial);
+          bottomMesh.name = child.name + "_bottom";
+
+          child.parent.add(topMesh);
+          child.parent.add(bottomMesh);
+          child.parent.remove(child);
+        }
+      });
+
+      // Adjust position / scale
+      object.position.set(0, 0, 0);
+      object.scale.set(0.3, 0.3, 0.3);
+      scene.add(object);
+    },
+    function(xhr) {
+      console.log(`${(xhr.loaded / xhr.total * 100).toFixed(0)}% loaded`);
+    },
+    function(error) {
+      console.error('Error loading model:', error);
     }
+  );
+});
+
+camera.position.set(0, 0, 40);
+camera.lookAt(scene.position);
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', function() {
+  const w = container.clientWidth;
+  const h = container.clientHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+}, false);
+</script>
+
+<script>
+/** AJAX Unlock + Geolocation **/
+const statusElement = document.getElementById('status');
+const unlockButton = document.getElementById('unlock-button');
+
+// The /unlock/<external_id> URL is embedded into the template context
+// We can do something like:
+const externalId = "{{ external_id }}";
+const unlockUrl = `/unlock/${externalId}`;
+
+unlockButton.addEventListener('click', function() {
+  statusElement.style.color = 'red';
+  statusElement.innerText = 'Requesting location...';
+
+  if (!navigator.geolocation) {
+    statusElement.innerText = 'Geolocation is not supported by this browser.';
+    return;
+  }
+
+  navigator.geolocation.getCurrentPosition(successLocation, errorLocation);
+
+  function successLocation(position) {
+    const lat = position.coords.latitude;
+    const lon = position.coords.longitude;
+
+    // We'll post via fetch, sending FormData, but with an AJAX header
+    const formData = new FormData();
+    formData.append('latitude', lat);
+    formData.append('longitude', lon);
+
+    fetch(unlockUrl, {
+      method: 'POST',
+      body: formData,
+      headers: {
+        'X-Requested-With': 'XMLHttpRequest' // So the Flask route knows it's AJAX
+      }
+    })
+    .then(response => {
+      // If HTTP status is not OK, we still parse the JSON (or handle text)
+      if (!response.ok) {
+        return response.json().then(data => {
+          throw new Error(data.message || 'Unlock request failed.');
+        });
+      }
+      return response.json();
+    })
+    .then(data => {
+      if (data.success) {
+        statusElement.style.color = 'green';
+        statusElement.innerText = 'Door unlocked. Enjoy your workout!';
+
+        // Turn the top mesh from RED to GREEN
+        if (topMeshRef) {
+          topMeshRef.material.color.setHex(0x00ff00);
+        }
+      } else {
+        // If server indicates success=false, show the message
+        statusElement.innerText = data.message || 'Unlock request failed.';
+      }
+    })
+    .catch(err => {
+      statusElement.innerText = err.message || 'Error unlocking door.';
+      console.error(err);
+    });
+  }
+
+  function errorLocation(error) {
+    let errorMessage;
+    switch(error.code) {
+      case error.PERMISSION_DENIED:
+        errorMessage = 'Permission denied. Please enable location services and try again.';
+        break;
+      case error.POSITION_UNAVAILABLE:
+        errorMessage = 'Location information is unavailable.';
+        break;
+      case error.TIMEOUT:
+        errorMessage = 'The request to get your location timed out.';
+        break;
+      default:
+        errorMessage = 'An unknown error occurred while retrieving your location.';
+        break;
+    }
+    statusElement.innerText = errorMessage;
+  }
 });
 </script>
 {% endblock %}
