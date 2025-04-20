@@ -1079,6 +1079,7 @@ def reset_database():
         logger.exception(f"Error resetting database: {e}")
         return jsonify({'error': 'Failed to reset database'}), 500
 
+
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
     # Log raw request data
@@ -1260,12 +1261,23 @@ def activity_feed():
         return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/activity_view', methods=['GET'])
+# ------------------------------------------------------------------
+# /activity_view  – HTML search page for recent events
+# ------------------------------------------------------------------
 def activity_view():
     """
-    Renders the HTML search page (templates/activity.html).
-    Use the search bar to call the JSON API at /activity?search=...
+    Renders the UI at templates/activity.html.
+    The page’s JS calls /activity?search=… to get data.
     """
-    return render_template('activity.html')
+    return render_template("activity.html")
+
+
+# Register the route so *all* of these work:
+#   /activity_view         /activity_view/         /activity-view
+app.add_url_rule("/activity_view",  view_func=_render_activity_page, methods=["GET"], strict_slashes=False)
+app.add_url_rule("/activity_view/", view_func=_render_activity_page, methods=["GET"], strict_slashes=False)
+app.add_url_rule("/activity-view",  view_func=_render_activity_page, methods=["GET"], strict_slashes=False)
+
 
 
 
