@@ -7,7 +7,7 @@ import base64
 import logging
 import threading
 import datetime
-from datetime import timezone, timedelta
+from datetime import datetime, timezone, timedelta
 import time
 import phonenumbers
 from phonenumbers import NumberParseException
@@ -23,6 +23,7 @@ import geopy
 
 from bson import BSON  # From pymongo
 from dotenv import load_dotenv
+from sqlalchemy.dialects.postgresql import JSONB
 
 load_dotenv()
 
@@ -114,36 +115,74 @@ def validate_phone_number(number):
 # Database Models
 # ----------------------------
 
+
+
+# Replace your existing Event model with this:
+
+class Event(db.Model):
+    __tablename__ = 'event'
+    id          = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
+    occurred_on = db.Column(db.DateTime, index=True, nullable=False)
+    event_type  = db.Column(db.String(100), nullable=True)
+    reader      = db.Column(db.String(100), nullable=True)
+    door        = db.Column(db.String(100), nullable=True)
+    person      = db.Column(db.String(200), nullable=True)
+    event_data  = db.Column(JSONB, nullable=True)
+    created_at  = db.Column(
+        db.DateTime,
+        default=lambda: datetime.utcnow(),   # ← use a lambda so .utcnow() is always called
+        nullable=False
+    )
+
+    __table_args__ = (db.Index('ix_event_occurred_on', 'occurred_on'),)
+
+
+
+
+
 class User(db.Model):
+    __tablename__ = 'user'
+    
     id = db.Column(db.Integer, primary_key=True)
     first_name = db.Column(db.String(50), nullable=False)
     last_name = db.Column(db.String(50), nullable=False)
     email = db.Column(db.String(120), unique=False, nullable=False)
     phone_number = db.Column(db.String(20), unique=False, nullable=False)
     facility_code = db.Column(db.Integer, nullable=False)
-    card_number = db.Column(db.Integer, unique=True, nullable=False)  # Raw 16-bit Card Number
+    card_number = db.Column(db.Integer, unique=True, nullable=False)          # Raw 16-bit Card Number
     formatted_card_number = db.Column(db.String(20), unique=True, nullable=False)  # 26-bit Formatted Card Number
     membership_start = db.Column(db.DateTime, nullable=False)
     membership_end = db.Column(db.DateTime, nullable=False)
-    external_id = db.Column(db.String(50), unique=True, nullable=False)
+
+    # NEW COLUMN: Feenics Key (the real MongoDB ObjectId from Feenics)
+    feenics_key = db.Column(db.String(50), unique=True, nullable=True)
+
+    # External ID from a 3rd-party system (if needed)
+    external_id = db.Column(db.String(50), unique=False, nullable=True)
 
     def is_membership_active(self):
         now = datetime.datetime.utcnow()
         return self.membership_start <= now <= self.membership_end
 
+# And replace your existing UnlockToken model with this:
+
 class UnlockToken(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    token = db.Column(db.String(36), unique=False, nullable=False)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
-    expires_at = db.Column(db.DateTime, nullable=False)
-    used = db.Column(db.Boolean, default=False)
-    external_id = db.Column(db.String(50), unique=False, nullable=False)
+    id          = db.Column(db.Integer, primary_key=True)
+    token       = db.Column(db.String(36), nullable=False)
+    user_id     = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    created_at  = db.Column(
+        db.DateTime,
+        default=lambda: datetime.utcnow(),   # ← same trick here
+        nullable=False
+    )
+    expires_at  = db.Column(db.DateTime, nullable=False)
+    used        = db.Column(db.Boolean, default=False)
+    external_id = db.Column(db.String(50), nullable=False)
 
     user = db.relationship('User', backref=db.backref('unlock_tokens', lazy=True))
 
     def is_valid(self):
-        now = datetime.datetime.utcnow()
+        now = datetime.utcnow()
         return not self.used and now < self.expires_at and self.user.is_membership_active()
 
 # ----------------------------
@@ -324,6 +363,93 @@ def format_hid_26bit_h10301(facility_code, card_number):
     logger.debug(f"Formatted Number: {formatted_number} (Binary: {final_bits})")
 
     return formatted_number, None
+def fetch_recent_events(base_address: str,
+                        access_token: str,
+                        instance_id: str,
+                        page_size: int = 250,
+                        since_iso: str | None = None,
+                        max_events: int = 1000) -> list[dict]:
+    """
+    Pulls raw events from Keep/Feenics and gives you a lightweight list
+    that already contains the decoded BSON payload.
+
+    Args:
+        page_size   – max 1000 (Keep API hard‑limit)
+        since_iso   – optional ISO‑8601 UTC string (e.g. 2025‑04‑18T15:00:00Z)
+        max_events  – safety cap so we don’t endlessly loop
+        
+    Returns:
+        List of dicts ⇒ [{occurred_on, event_type, description, reader,
+                          person, door, event_data}, …]
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    endpoint = f"{base_address}/api/f/{instance_id}/events"
+
+    # Convert ?since=… to a datetime for local filtering
+    since_dt = None
+    if since_iso:
+        since_dt = datetime.datetime.fromisoformat(
+            since_iso.replace("Z", "+00:00")
+        )
+
+    collected: list[dict] = []
+    page = 0
+    while len(collected) < max_events:
+        params = {
+            "page": page,
+            "pageSize": page_size,
+            "includeSubFolders": "false",
+            "includeSharedInstances": "false",
+            "spanScope": "false",
+            "requiresAck": "false",
+            "priorityThreshold": 0
+        }
+
+        resp = SESSION.get(endpoint, headers=headers, params=params, timeout=30)
+        resp.raise_for_status()
+        batch = resp.json()
+        if not batch:               # no more data
+            break
+
+        for ev in batch:
+            occurred_on = ev.get("OccurredOn")          # ISO‑8601 string
+            if since_dt and occurred_on:
+                ev_dt = datetime.datetime.fromisoformat(
+                    occurred_on.replace("Z", "+00:00")
+                )
+                if ev_dt < since_dt:
+                    continue     # too old – skip
+
+            # Decode the BSON payload (may fail for some system events)
+            try:
+                raw_b64 = ev.get("EventDataBsonBase64", "")
+                bson_bytes = base64.b64decode(raw_b64)
+                event_data = BSON(bson_bytes).decode()
+            except Exception:
+                event_data = {}
+
+            collected.append({
+                "occurred_on": occurred_on,
+                "event_type": ev.get("EventTypeMoniker", {}).get("Nickname"),
+                "description": ev.get("EventTypeMoniker", {}).get("Namespace"),
+                "reader": next((o["CommonName"]
+                                for o in ev.get("RelatedObjects", [])
+                                if o.get("Relation") == "Reader"), None),
+                "door": next((o["CommonName"]
+                              for o in ev.get("RelatedObjects", [])
+                              if o.get("Relation") == "Door"), None),
+                "person": next((o["CommonName"]
+                                for o in ev.get("RelatedObjects", [])
+                                if o.get("Relation") == "Person"), None),
+                "event_data": event_data
+            })
+
+            if len(collected) >= max_events:
+                break
+        page += 1
+
+    return collected
+
 
 def generate_card_number() -> int:
     """
@@ -383,58 +509,107 @@ def get_access_levels(base_address, access_token, instance_id):
     except Exception as err:
         logger.error(f"Error retrieving access levels: {err}")
         raise
+from datetime import datetime, timedelta
+from sqlalchemy import func
 
-def create_user(base_address, access_token, instance_id, first_name, last_name, email, phone_number, badge_type_info, membership_duration_hours, external_id):
+from sqlalchemy.exc import ProgrammingError
+from sqlalchemy import inspect
+
+
+
+
+def sync_events_job():
     """
-    Creates a new user in the Keep by Feenics system.
+    1) On first run (empty table), fetch last 6 months.
+    2) Afterwards fetch only events newer than the newest in DB.
+    3) Purge anything older than 6 months.
+    """
+    with app.app_context():
+        insp = inspect(db.engine)
+        if not insp.has_table(Event.__tablename__):
+            logger.warning("Event table not yet created; skipping sync_events_job.")
+            return
 
-    Returns:
-        tuple: (User object, user_id)
+        # find the newest event we already have
+        last_dt = db.session.query(func.max(Event.occurred_on)).scalar()
+
+        # decide how far back to pull
+        if last_dt is None:
+            since_dt = datetime.utcnow() - timedelta(days=180)
+        else:
+            since_dt = last_dt
+
+        since_iso = since_dt.replace(microsecond=0).isoformat() + 'Z'
+
+        # pull from Feenics
+        token, inst_id = get_access_token(
+            BASE_ADDRESS, INSTANCE_NAME, KEEP_USERNAME, KEEP_PASSWORD
+        )
+        raw_events = fetch_recent_events(
+            base_address=BASE_ADDRESS,
+            access_token=token,
+            instance_id=inst_id,
+            page_size=500,
+            since_iso=since_iso,
+            max_events=5000
+        )
+
+        # upsert into local DB
+        for ev in raw_events:
+            ev_dt = datetime.fromisoformat(ev['occurred_on'].replace('Z','+00:00'))
+            exists = Event.query.filter_by(
+                occurred_on=ev_dt,
+                event_data=ev['event_data']
+            ).first()
+            if exists:
+                continue
+
+            db.session.add(Event(
+                occurred_on = ev_dt,
+                event_type  = ev.get('event_type'),
+                reader      = ev.get('reader'),
+                door        = ev.get('door'),
+                person      = ev.get('person'),
+                event_data  = ev.get('event_data')
+            ))
+        db.session.commit()
+
+        # purge >6 months old
+        cutoff = datetime.utcnow() - timedelta(days=180)
+        Event.query.filter(Event.occurred_on < cutoff).delete()
+        db.session.commit()
+def create_user(base_address, access_token, instance_id, first_name, last_name,
+                email, phone_number, badge_type_info, membership_duration_hours,
+                external_id):
+    """
+    Creates a new user in the Keep by Feenics system and stores it in our local DB.
+    Returns: (user, feenics_person_key)
     """
     create_person_endpoint = f"{base_address}/api/f/{instance_id}/people"
 
-    # ----------------------------
-    # Step 1: Generate and Format Card Number
-    # ----------------------------
+    # 1. Generate raw 16-bit card number
+    card_number = generate_card_number()
+    facility_code = FACILITY_CODE
 
-    # Generate raw 16-bit card number
-    card_number = generate_card_number()  # Returns int within 0-65535
-    facility_code = FACILITY_CODE  # From environment variable
-    logger.debug(f"Generated Card Number: {card_number}, Facility Code: {facility_code}")
-
-    # Format the card number into a 26-bit number
+    # 2. Format to 26-bit HID
     formatted_card_number, error_message = format_hid_26bit_h10301(facility_code, card_number)
-
-    if formatted_card_number is None:
+    if not formatted_card_number:
         logger.error(f"Error formatting card number: {error_message}")
         raise ValueError(error_message)
 
-    logger.debug(f"Formatted Card Number (26-bit): {formatted_card_number}")
-
-    # ----------------------------
-    # Step 2: Prepare Active and Expiration Times
-    # ----------------------------
-
+    # 3. Prepare active/expiration times
     active_on = datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-    expires_on = (datetime.datetime.utcnow() + timedelta(hours=membership_duration_hours)).replace(microsecond=0).isoformat() + "Z"
+    expires_on = (datetime.datetime.utcnow() + timedelta(hours=membership_duration_hours))\
+                    .replace(microsecond=0).isoformat() + "Z"
 
-    # ----------------------------
-    # Step 3: Retrieve Card Formats
-    # ----------------------------
-
+    # 4. Get card formats from Feenics
     card_formats = get_card_formats(base_address, access_token, instance_id)
     if not card_formats:
-        logger.error("No card formats found.")
         raise Exception("No card formats available to assign to the card.")
 
-    # Use the first available card format
     selected_card_format = card_formats[0]
-    logger.info(f"Using card format: {selected_card_format.get('CommonName')}")
 
-    # ----------------------------
-    # Step 4: Prepare Card Assignment Data
-    # ----------------------------
-
+    # 5. Construct the card assignment
     card_assignment = {
         "$type": "Feenics.Keep.WebApi.Model.CardAssignmentInfo, Feenics.Keep.WebApi.Model",
         "EncodedCardNumber": int(card_number),
@@ -455,10 +630,7 @@ def create_user(base_address, access_token, instance_id, first_name, last_name, 
         "CurrentUseCount": 0,
     }
 
-    # ----------------------------
-    # Step 5: Prepare User Data for CRM API
-    # ----------------------------
-
+    # 6. Construct user data for Feenics
     user_data = {
         "$type": "Feenics.Keep.WebApi.Model.PersonInfo, Feenics.Keep.WebApi.Model",
         "CommonName": f"{first_name} {last_name}",
@@ -492,44 +664,33 @@ def create_user(base_address, access_token, instance_id, first_name, last_name, 
                 "$type": "Feenics.Keep.WebApi.Model.MetadataItem, Feenics.Keep.WebApi.Model",
                 "Application": "CustomApp",
                 "Values": json.dumps({
-                    "CardNumber": str(card_number),           # Raw 16-bit Card Number
-                    "FacilityCode": str(facility_code)        # Facility Code
+                    "CardNumber": str(card_number),
+                    "FacilityCode": str(facility_code)
                 }),
                 "ShouldPublishUpdateEvents": False
             }
         ]
     }
 
-    # ----------------------------
-    # Step 6: Define Headers for CRM API Request
-    # ----------------------------
-
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
     }
 
-    # ----------------------------
-    # Step 7: Make CRM API Request to Create User
-    # ----------------------------
-
+    # 7. Create the person in Feenics
     try:
         response = SESSION.post(create_person_endpoint, headers=headers, json=user_data)
         response.raise_for_status()
 
         response_data = response.json()
-        user_id = response_data.get("Key")
+        feenics_person_key = response_data.get("Key")  # This is Feenics's real Mongo ObjectId
 
-        if not user_id:
-            raise Exception("User ID not found in the response.")
+        if not feenics_person_key:
+            raise Exception("User ID (Feenics Key) not found in Feenics response.")
 
-        logger.info(f"User '{first_name} {last_name}' created successfully with ID: {user_id}")
-        logger.info(f"Assigned Card Number: {card_number}, Facility Code: {facility_code}")
+        logger.info(f"User '{first_name} {last_name}' created in Feenics with Key={feenics_person_key}")
 
-        # ----------------------------
-        # Step 8: Create User in Local Database
-        # ----------------------------
-
+        # 8. Store in our local DB
         membership_start = datetime.datetime.utcnow()
         membership_end = membership_start + timedelta(hours=membership_duration_hours)
 
@@ -538,18 +699,22 @@ def create_user(base_address, access_token, instance_id, first_name, last_name, 
             last_name=last_name,
             email=email,
             phone_number=phone_number,
-            card_number=card_number,                      # Raw 16-bit Card Number
-            formatted_card_number=formatted_card_number,  # 26-bit Formatted Card Number
+            card_number=card_number,
+            formatted_card_number=formatted_card_number,
             facility_code=facility_code,
             membership_start=membership_start,
             membership_end=membership_end,
+
+            # NOW store Feenics's real ObjectId
+            feenics_key=feenics_person_key,
+            # Keep external_id if it's coming from outside system
             external_id=external_id
         )
 
         db.session.add(user)
         db.session.commit()
 
-        return user, user_id  # Return both user and user_id
+        return user, feenics_person_key
 
     except requests.exceptions.HTTPError as http_err:
         logger.error(f"HTTP error during user creation: {http_err}")
@@ -558,6 +723,7 @@ def create_user(base_address, access_token, instance_id, first_name, last_name, 
     except Exception as err:
         logger.error(f"Error during user creation: {err}")
         raise
+
 
 def assign_access_levels_to_user(base_address, access_token, instance_id, person_key, access_levels):
     """
@@ -744,14 +910,15 @@ def create_unlock_link(external_id):
 # User Creation and Messaging Workflow
 # ----------------------------
 
-def process_user_creation(first_name, last_name, email, phone_number, external_id, membership_duration_hours=24):
+def process_user_creation(first_name, last_name, email, phone_number,
+                          external_id, membership_duration_hours=24):
     """
-    Complete workflow to create or update a user in CRM, store membership info, assign access levels,
-    generate unlock link, and (optionally) send an SMS.
+    Creates or updates a user in Feenics, stores membership info locally,
+    assigns access levels, generates unlock link, etc.
     """
     try:
         with app.app_context():
-            # Step 1: Authenticate
+            # 1. Authenticate with Feenics
             access_token, instance_id = get_access_token(
                 base_address=BASE_ADDRESS,
                 instance_name=INSTANCE_NAME,
@@ -759,91 +926,99 @@ def process_user_creation(first_name, last_name, email, phone_number, external_i
                 password=KEEP_PASSWORD
             )
 
-            # Step 2: Get or Create Badge Type
+            # 2. Get or create the desired Badge Type
             badge_types = get_badge_types(BASE_ADDRESS, access_token, instance_id)
-            badge_type_info = next((bt for bt in badge_types if bt.get("CommonName") == BADGE_TYPE_NAME), None)
-
+            badge_type_info = next(
+                (bt for bt in badge_types if bt.get("CommonName") == BADGE_TYPE_NAME), None
+            )
             if not badge_type_info:
-                logger.info(f"Badge Type '{BADGE_TYPE_NAME}' does not exist. Creating it now.")
-                badge_type_response = create_badge_type(BASE_ADDRESS, access_token, instance_id, BADGE_TYPE_NAME)
+                # create_badge_type returns the new object or None if 409
+                badge_type_response = create_badge_type(
+                    BASE_ADDRESS, access_token, instance_id, BADGE_TYPE_NAME
+                )
                 if badge_type_response:
                     badge_type_info = badge_type_response
                 else:
-                    # If Badge Type already exists (status code 409), retrieve its details
-                    badge_type_info = get_badge_type_details(BASE_ADDRESS, access_token, instance_id, BADGE_TYPE_NAME)
+                    # If it was already existing but we got 409,
+                    # then fetch details again
+                    badge_type_info = get_badge_type_details(
+                        BASE_ADDRESS, access_token, instance_id, BADGE_TYPE_NAME
+                    )
 
-            # Step 3: Retrieve all access levels
+            # 3. Retrieve all access levels from Feenics
             access_levels = get_access_levels(BASE_ADDRESS, access_token, instance_id)
             if not access_levels:
-                logger.error("No access levels found.")
                 raise Exception("No access levels available to assign to the user.")
 
-            # Step 4: Check if user exists in the local database
+            # 4. Check local DB for existing user
             existing_user = User.query.filter_by(email=email).first()
+
             if existing_user:
-                logger.info(f"User with email {email} already exists in the local database.")
-
+                logger.info(f"User with email {email} already exists in local DB.")
+                
+                # Extend membership in local DB
                 current_time = datetime.datetime.utcnow()
-
-                # If membership_end < now => membership is expired => renew from now
-                # Otherwise => membership still active => extend from the existing end
-                if existing_user.membership_end < current_time:
-                    logger.info("Membership is expired. Renewing from now.")
-                    existing_user.membership_end = current_time + timedelta(hours=membership_duration_hours)
-                else:
-                    logger.info("Membership is active. Extending existing membership.")
-                    existing_user.membership_end += timedelta(hours=membership_duration_hours)
-
+                new_end = max(existing_user.membership_end, current_time) + \
+                          timedelta(hours=membership_duration_hours)
+                existing_user.membership_end = new_end
                 db.session.commit()
-                logger.info(
-                    f"Updated membership for user {email} to {existing_user.membership_end}"
-                )
 
-                # Generate new unlock token with the same external_id
+                # REASSIGN ACCESS in Feenics, using the real Key
+                # If existing_user.feenics_key is None, it means the user was never
+                # actually created in Feenics. In that case, you might need to call create_user
+                # or handle that scenario. Otherwise:
+                if existing_user.feenics_key:
+                    assign_access_levels_to_user(
+                        base_address=BASE_ADDRESS,
+                        access_token=access_token,
+                        instance_id=instance_id,
+                        # MUST pass the Feenics Key, not external_id
+                        person_key=existing_user.feenics_key,
+                        access_levels=access_levels
+                    )
+                    logger.info("Reassigned access levels in Feenics for existing user.")
+                else:
+                    logger.warning("Existing user has no feenics_key - cannot update in Feenics.")
+
+                # Generate new unlock token, etc.
                 unlock_token_str = generate_unlock_token(existing_user.id, external_id)
                 unlock_link = create_unlock_link(external_id)
-                logger.info(f"Generated new unlock token for user {email}")
+                logger.info(f"Membership extended. Generated unlock link: {unlock_link}")
 
-                # Optionally, reassign or refresh access levels if needed:
-                # assign_access_levels_to_user(
-                #     base_address=BASE_ADDRESS,
-                #     access_token=access_token,
-                #     instance_id=instance_id,
-                #     person_key=existing_user.external_id,
-                #     access_levels=access_levels
-                # )
+                return
 
-                return  # Stop here after handling existing user
+            else:
+                # 5. Brand new user in Feenics + local DB
+                user, feenics_person_key = create_user(
+                    base_address=BASE_ADDRESS,
+                    access_token=access_token,
+                    instance_id=instance_id,
+                    first_name=first_name,
+                    last_name=last_name,
+                    email=email,
+                    phone_number=phone_number,
+                    badge_type_info=badge_type_info,
+                    membership_duration_hours=membership_duration_hours,
+                    external_id=external_id
+                )
 
-            # Step 5: Create the user via CRM API and store in local database
-            user, user_id = create_user(
-                base_address=BASE_ADDRESS,
-                access_token=access_token,
-                instance_id=instance_id,
-                first_name=first_name,
-                last_name=last_name,
-                email=email,
-                phone_number=phone_number,
-                badge_type_info=badge_type_info,
-                membership_duration_hours=membership_duration_hours,
-                external_id=external_id  # Pass the external_id
-            )
+                # 6. Assign Access Levels in Feenics
+                assign_access_levels_to_user(
+                    base_address=BASE_ADDRESS,
+                    access_token=access_token,
+                    instance_id=instance_id,
+                    # Now we pass the real Feenics Key
+                    person_key=feenics_person_key,
+                    access_levels=access_levels
+                )
 
-            # Step 6: Assign Access Levels to the User
-            assign_access_levels_to_user(
-                base_address=BASE_ADDRESS,
-                access_token=access_token,
-                instance_id=instance_id,
-                person_key=user_id,
-                access_levels=access_levels
-            )
+                # Wait a bit, just in case
+                time.sleep(2)
 
-            # Optional: Wait briefly for access level assignment
-            time.sleep(2)
-
-            # Step 7: Generate Unlock Token and Link
-            unlock_token_str = generate_unlock_token(user.id, external_id)
-            unlock_link = create_unlock_link(external_id)
+                # 7. Generate unlock token and link
+                unlock_token_str = generate_unlock_token(user.id, external_id)
+                unlock_link = create_unlock_link(external_id)
+                logger.info(f"User created. Unlock link: {unlock_link}")
 
     except Exception as e:
         logger.exception(f"Error in processing user creation: {e}")
@@ -974,51 +1149,165 @@ def handle_webhook():
         first_name, last_name, email, phone_number, external_id, membership_duration_hours)).start()
 
     return jsonify({'status': 'User creation in progress'}), 200
+    
+# ------------------------------------------------------------------
+# JSON‑safe helper
+# ------------------------------------------------------------------
+import base64
+import datetime as _dt
+
+def _scrub_bytes(obj):
+    """
+    Recursively convert objects that JSON can't handle:
+        • bytes / bytearray  -> base‑64 string
+        • datetime / date    -> ISO‑8601 string
+    Works for nested dicts / lists.
+    """
+    if isinstance(obj, (bytes, bytearray)):
+        return base64.b64encode(obj).decode()
+    if isinstance(obj, (_dt.datetime, _dt.date)):
+        return obj.isoformat()
+    if isinstance(obj, dict):
+        return {k: _scrub_bytes(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_scrub_bytes(v) for v in obj]
+    return obj
+
+
+# ------------------------------------------------------------------
+# /activity  – recent unlock / door / exit events feed
+# ------------------------------------------------------------------
+@app.route('/activity', methods=['GET'])
+def activity_feed():
+    """
+    GET /activity
+      ?limit=<1‑1000>           (default 100)
+      ?since=<ISO‑8601‑UTC>     (optional; e.g. 2025‑04‑18T14:00:00Z)
+      ?search=<string>          (optional; filters by Person or User.CommonName)
+
+    Returns a JSON list of events, already scrubbed for JSON safety.
+    """
+    try:
+        # 1) authenticate
+        token, inst_id = get_access_token(
+            base_address=BASE_ADDRESS,
+            instance_name=INSTANCE_NAME,
+            username=KEEP_USERNAME,
+            password=KEEP_PASSWORD
+        )
+
+        # 2) parse query params
+        try:
+            limit = max(1, min(int(request.args.get("limit", "100")), 1000))
+        except ValueError:
+            limit = 100
+        since_iso = request.args.get("since")    # e.g. "2025-04-18T14:00:00Z"
+        search_q  = request.args.get("search", "").strip().lower()
+
+        # 3) fetch raw events
+        events_raw = fetch_recent_events(
+            base_address=BASE_ADDRESS,
+            access_token=token,
+            instance_id=inst_id,
+            page_size=min(limit, 1000),
+            since_iso=since_iso,
+            max_events=limit
+        )
+
+        # 4) if search supplied, filter by Person or User.CommonName
+        if search_q:
+            filtered = []
+            for ev in events_raw:
+                ed = ev.get("event_data", {}) or {}
+                # Person from payload
+                person_str = ed.get("Person") or ""
+                # User.CommonName from payload
+                user_obj   = ed.get("User") or {}
+                user_str   = user_obj.get("CommonName") or ""
+                if (search_q in person_str.lower()) or (search_q in user_str.lower()):
+                    filtered.append(ev)
+            events_to_return = filtered
+        else:
+            events_to_return = events_raw
+
+        # 5) scrub bytes/datetimes and return
+        safe = _scrub_bytes(events_to_return)
+        return jsonify({"events": safe}), 200
+
+    except requests.HTTPError as http_err:
+        logger.error(f"Feenics API error while fetching activity: {http_err}")
+        return jsonify({"error": "Failed to reach Feenics API"}), 502
+    except Exception as e:
+        logger.exception(f"Unhandled error in /activity: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/activity_view', methods=['GET'])
+def activity_view():
+    """
+    Renders the HTML search page (templates/activity.html).
+    Use the search bar to call the JSON API at /activity?search=...
+    """
+    return render_template('activity.html')
+
+
+
 
 
 from geopy.distance import geodesic  # Add this import
 @app.route('/unlock/<external_id>', methods=['GET', 'POST'])
 def handle_unlock(external_id):
     logger.debug(f"Received unlock request for external_id: {external_id}")
+    
     if request.method == 'GET':
+        # Validate the token
         is_valid, result = validate_unlock_token_by_external_id(external_id)
-
         if not is_valid:
             logger.warning(f"Unlock attempt failed: {result}")
             # Render error template with the message
             return render_template('error.html', message=result), 400
 
-        # Pass external_id to the template
-        return render_template('templates/unlock.html', external_id=external_id)
-    elif request.method == 'POST':
-        logger.debug(f"Processing unlock for external_id: {external_id}")
-        is_valid, result = validate_unlock_token_by_external_id(external_id)
+        # Render the unlock page which includes the 3D model & JS
+        return render_template('unlock.html', external_id=external_id)
 
+    # POST method => attempt to unlock
+    elif request.method == 'POST':
+        # Check if it's AJAX or not
+        is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+        logger.debug(f"Processing unlock (AJAX={is_ajax}) for external_id: {external_id}")
+
+        # Validate the token
+        is_valid, result = validate_unlock_token_by_external_id(external_id)
         if not is_valid:
             logger.warning(f"Unlock attempt failed: {result}")
+            # CHANGED: Always render error.html, even for AJAX
             return render_template('error.html', message=result), 400
 
-        unlock_token = result  # Now we have the valid unlock_token
+        unlock_token = result  # The valid UnlockToken object
 
         # Get the user's submitted location
         latitude = request.form.get('latitude')
         longitude = request.form.get('longitude')
 
         if not latitude or not longitude:
-            logger.warning("Location data not provided.")
-            return render_template('error.html', message='Location data is required to unlock the door.'), 400
+            msg = 'Location data is required to unlock the door.'
+            logger.warning(msg)
+            # CHANGED: Always render error.html, even for AJAX
+            return render_template('error.html', message=msg), 400
 
+        # Validate lat/long
         try:
             user_lat = float(latitude)
             user_lon = float(longitude)
         except ValueError:
-            logger.warning("Invalid location data.")
-            return render_template('error.html', message='Invalid location data received.'), 400
+            msg = 'Invalid location data received.'
+            logger.warning(msg)
+            # CHANGED: Always render error.html, even for AJAX
+            return render_template('error.html', message=msg), 400
 
         # Gym's location (latitude and longitude)
-        GYM_LATITUDE = 36.2020864   # Replace with your gym's actual latitude
-        GYM_LONGITUDE = -86.6091008 # Replace with your gym's actual longitude
-        MAX_DISTANCE_METERS = 3000.4080393305367  # Maximum allowed distance in meters
+        GYM_LATITUDE = 36.2020864
+        GYM_LONGITUDE = -86.6091008
+        MAX_DISTANCE_METERS = 3000.4080393305367  # 3km, for example
 
         # Compute the distance between the user and the gym
         user_location = (user_lat, user_lon)
@@ -1030,28 +1319,35 @@ def handle_unlock(external_id):
         logger.debug(f"Distance to gym: {distance} meters")
 
         if distance > MAX_DISTANCE_METERS:
-            logger.warning(f"User is too far from the gym. Distance: {distance} meters.")
-            return render_template('error.html', message='You must be at the gym to unlock the door.'), 400
+            msg = 'You must be at the gym to unlock the door.'
+            logger.warning(f"{msg} Distance: {distance} meters.")
+            # CHANGED: Always render error.html, even for AJAX
+            return render_template('error.html', message=msg), 400
 
         # Check if the membership is still active
         if not unlock_token.user.is_membership_active():
-            logger.warning("Membership is no longer active.")
-            return render_template('error.html', message='Your membership has expired. Please renew to continue accessing the gym.'), 400
+            msg = 'Your membership has expired. Please renew to continue accessing the gym.'
+            logger.warning(msg)
+            # CHANGED: Always render error.html, even for AJAX
+            return render_template('error.html', message=msg), 400
 
-        # User is at the gym and membership is active, proceed with unlock
-
-        # Mark the token as used
+        # Everything is okay => mark token as used and simulate unlock
         with app.app_context():
             unlock_token.used = True
             db.session.commit()
 
-        # Simulate the unlock
+        # Fire off the unlock in a thread so we don't block
         card_number = unlock_token.user.card_number
         facility_code = unlock_token.user.facility_code
         threading.Thread(target=simulate_unlock, args=(card_number, facility_code)).start()
 
-        # Render a response template or return a message
-        return render_template('unlocking.html')
+        if is_ajax:
+            # Return a JSON success so the front-end JS can change the indicator to green
+            return jsonify({"success": True})
+        else:
+            # Standard response if not using AJAX
+            return render_template('unlocking.html')
+
 
 
 def simulate_unlock(card_number, facility_code):
@@ -1224,8 +1520,120 @@ def simulate_card_read(base_address, access_token, instance_id, reader, card_for
     except Exception as err:
         logger.error(f"Error during event publishing: {err}")
         return False
+def backfill_feenics_keys():
+    """
+    Loops through all existing users who have no feenics_key in our local DB,
+    creates them in Feenics using create_user(...), and updates the record 
+    with the newly returned feenics_key.
+    """
+    try:
+        # 1. Authenticate with Feenics
+        access_token, instance_id = get_access_token(
+            base_address=BASE_ADDRESS,
+            instance_name=INSTANCE_NAME,
+            username=KEEP_USERNAME,
+            password=KEEP_PASSWORD
+        )
 
-# ----------------------------
+        # 2. Get or create the Badge Type
+        badge_types = get_badge_types(BASE_ADDRESS, access_token, instance_id)
+        badge_type_info = next(
+            (bt for bt in badge_types if bt.get("CommonName") == BADGE_TYPE_NAME), 
+            None
+        )
+        if not badge_type_info:
+            # Attempt to create the badge type if it doesn't exist
+            badge_type_response = create_badge_type(
+                BASE_ADDRESS, access_token, instance_id, BADGE_TYPE_NAME
+            )
+            if badge_type_response:
+                badge_type_info = badge_type_response
+            else:
+                # If it was already existing but we got a 409, fetch details again
+                badge_type_info = get_badge_type_details(
+                    BASE_ADDRESS, access_token, instance_id, BADGE_TYPE_NAME
+                )
+
+        if not badge_type_info:
+            logger.error(f"Cannot proceed: Badge type '{BADGE_TYPE_NAME}' not found or created.")
+            return
+
+        # 3. Find all Users missing feenics_key
+        users_missing_key = User.query.filter(User.feenics_key.is_(None)).all()
+        if not users_missing_key:
+            logger.info("No users missing Feenics key. Backfill not needed.")
+            return
+
+        logger.info(f"Found {len(users_missing_key)} user(s) with no feenics_key. Backfilling...")
+
+        # 4. Process each user
+        for local_user in users_missing_key:
+            try:
+                # We'll pick a membership_duration_hours (default 24 here),
+                # or you can use the user's existing membership_end to calculate 
+                # how many hours are left, etc.
+                default_duration = 24
+
+                # Call the existing Feenics creation logic
+                # This will create them in Feenics and set user.feenics_key
+                new_user, feenics_person_key = create_user(
+                    base_address=BASE_ADDRESS,
+                    access_token=access_token,
+                    instance_id=instance_id,
+                    first_name=local_user.first_name,
+                    last_name=local_user.last_name,
+                    email=local_user.email,
+                    phone_number=local_user.phone_number,
+                    badge_type_info=badge_type_info,
+                    membership_duration_hours=default_duration,
+                    external_id=local_user.external_id
+                )
+
+                logger.info(
+                    f"Backfilled feenics_key for user id={local_user.id} (Local DB). "
+                    f"Assigned Feenics Key={feenics_person_key}"
+                )
+            except Exception as e:
+                logger.exception(
+                    f"Error creating Feenics user for local user id={local_user.id}: {e}"
+                )
+
+        logger.info("Backfill operation completed.")
+
+    except Exception as e:
+        logger.exception(f"Failed to run backfill_feenics_keys(): {e}")
+
+from sqlalchemy.exc import ProgrammingError
+
+def init_db():
+    """Creates all tables (and indexes), but ignores a DuplicateTable on our index."""
+    with app.app_context():
+        try:
+            db.create_all()
+        except ProgrammingError as e:
+            # if our only complaint is “relation ix_event_occurred_on already exists”, ignore it
+            if 'ix_event_occurred_on' in str(e.orig):
+                logger.info("Index ix_event_occurred_on already exists, skipping.")
+            else:
+                # some other SQL error—re‑raise so you don’t hide it
+                raise
+
+# … later, instead of calling db.create_all() directly, call init_db():
+
+from apscheduler.schedulers.background import BackgroundScheduler
+
+# ensure our tables & indexes exist (without crashing on dup–index)
+init_db()
+
+sched = BackgroundScheduler()
+sched.add_job(
+    func=sync_events_job,
+    trigger='interval',
+    hours=24,
+    next_run_time=datetime.utcnow() + timedelta(seconds=10)   # 2. give DB time
+)                                                             #    to be created
+sched.start()
+
 # Main Execution
 # ----------------------------
 
