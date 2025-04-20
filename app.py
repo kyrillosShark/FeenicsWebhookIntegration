@@ -1029,20 +1029,38 @@ def process_user_creation(first_name, last_name, email, phone_number,
 
 def validate_unlock_token_by_external_id(external_id):
     """
-    Validates the unlock token using external_id.
+    Validate an unlock‑token using the caller‑supplied external_id.
+
+    Returns
+    -------
+    (bool, UnlockToken | str)
+        • (True,  <UnlockToken>)  – when a still‑valid token is found
+        • (False, <error‑message>)
     """
+    external_id = str(external_id)                   # ← ensure string match
+
     with app.app_context():
-        unlock_tokens = UnlockToken.query.filter_by(external_id=external_id).order_by(UnlockToken.created_at.desc()).all()
+        unlock_tokens = (UnlockToken.query
+                         .filter_by(external_id=external_id)
+                         .order_by(UnlockToken.created_at.desc())
+                         .all())
 
         if not unlock_tokens:
             return False, "Invalid unlock link."
 
-        # Find the most recent valid unlock token
-        for unlock_token in unlock_tokens:
-            if not unlock_token.used and datetime.datetime.utcnow() < unlock_token.expires_at and unlock_token.user.is_membership_active():
-                return True, unlock_token
+        # pick the newest token that is unused, unexpired, and owned by a
+        # member whose membership is still active
+        for token in unlock_tokens:
+            if (not token.used and
+                datetime.datetime.utcnow() < token.expires_at and
+                token.user.is_membership_active()):
+                return True, token
 
-        return False, "No valid unlock token found. Please purchase a new pass or contact support."
+        return False, (
+            "No valid unlock token found. Please purchase a new pass or "
+            "contact support."
+        )
+
 
 # ----------------------------
 # Flask Routes
